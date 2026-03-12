@@ -1,4 +1,4 @@
-# Dual Load Cell Monitoring System (Standardization Project)
+# Dual Load Cell Monitoring System (Standaritation Production)
 
 Proyek ini adalah sistem monitoring berat menggunakan dua buah sensor **Load Cell** yang terhubung ke modul **HX711**. Sistem ini dirancang untuk memantau dua target berat yang berbeda secara bersamaan dengan indikator LED sebagai status standarisasi berat.
 
