@@ -1,24 +1,61 @@
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
 #include "HX711.h"
 
-// --- PIN SENSOR A (Target 2kg) ---
+// --- SETTING WIFI & MQTT ---
+const char* ssid = "   ";
+const char* password = "   ";
+const char* mqtt_server = "   "; 
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// --- PIN SENSOR ---
 #define DT_A D2
 #define SCK_A D1
-// --- PIN SENSOR B (Target 5kg) ---
 #define DT_B D4
 #define SCK_B D3
 
 // --- PIN LED ---
 #define LED_MERAH D5
-#define LED_BIRU  D6  // Untuk Sensor A (2kg)
-#define LED_HIJAU D7  // Untuk Sensor B (5kg)
+#define LED_BIRU  D6  // Untuk Sensor A
+#define LED_HIJAU D7  // Untuk Sensor B
 
 HX711 hxA;
 HX711 hxB;
 
-// Masukkan faktor kalibrasi masing-masing sensor
-// Lakukan kalibrasi
 float faktorA = -42000.0; 
 float faktorB = -42000.0; 
+
+// Variabel Pendukung MQTT (Peak Detection)
+float maxA = 0;
+float maxB = 0;
+
+void setup_wifi() {
+  delay(10);
+  Serial.print("\nConnecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected");
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect("NodeMCU_Nels_Production")) {
+      Serial.println("Connected to MQTT Broker");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try зgain in 5 seconds");
+      delay(5000);
+    }
+  }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -27,7 +64,7 @@ void setup() {
   pinMode(LED_BIRU, OUTPUT);
   pinMode(LED_HIJAU, OUTPUT);
 
-  // Tahap Persiapan: Nyalakan semua lampu
+  // Nyalakan semua lampu saat start (indikator persiapan)
   digitalWrite(LED_MERAH, HIGH);
   digitalWrite(LED_BIRU, HIGH);
   digitalWrite(LED_HIJAU, HIGH);
@@ -35,41 +72,36 @@ void setup() {
   hxA.begin(DT_A, SCK_A);
   hxB.begin(DT_B, SCK_B);
 
-  Serial.println("\n--- MEMULAI SISTEM DUAL SENSOR ---");
-  Serial.println("Mohon Tunggu... Sedang menstabilkan sensor.");
+  delay(2000); // Tunggu stabil
 
-  delay(5000); // Waktu tunggu stabilitas tegangan
-
-  // Proses Tare Sensor A
   if (hxA.is_ready()) {
-    hxA.set_scale();
-    hxA.tare(60); 
     hxA.set_scale(faktorA);
-    Serial.println("Sensor A (2kg) Siap.");
+    hxA.tare();
   }
-
-  // Proses Tare Sensor B
   if (hxB.is_ready()) {
-    hxB.set_scale();
-    hxB.tare(60); 
     hxB.set_scale(faktorB);
-    Serial.println("Sensor B (5kg) Siap.");
+    hxB.tare();
   }
 
-  // Persiapan selesai: Matikan semua lampu
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+
+  // Matikan lampu, siap digunakan
   digitalWrite(LED_MERAH, LOW);
   digitalWrite(LED_BIRU, LOW);
   digitalWrite(LED_HIJAU, LOW);
 }
 
 void loop() {
+  if (!client.connected()) reconnect();
+  client.loop();
+
   float beratA = 0.0;
   float beratB = 0.0;
 
   // --- PEMBACAAN SENSOR A ---
   if (hxA.is_ready()) {
     float readingA = hxA.get_units(2);
-    // Noise Gate: Jika di bawah 0.4kg anggap 0 (mengatasi turun pelan-pelan)
     if (readingA < 0.4) readingA = 0.0;
     beratA = round(readingA * 10.0) / 10.0;
   }
@@ -77,49 +109,53 @@ void loop() {
   // --- PEMBACAAN SENSOR B ---
   if (hxB.is_ready()) {
     float readingB = hxB.get_units(2);
-    // Noise Gate: Jika di bawah 0.4kg anggap 0
     if (readingB < 0.4) readingB = 0.0;
     beratB = round(readingB * 10.0) / 10.0;
   }
 
-  // Tampilkan di Serial Monitor
-  Serial.print("Berat A: "); Serial.print(beratA, 1);
-  Serial.print(" kg | Berat B: "); Serial.print(beratB, 1);
-  Serial.println(" kg");
+  // --- LOGIKA PEAK DETECTION & KIRIM MQTT ---
+  // Sensor A
+  if (beratA >= 0.4) {
+    if (beratA > maxA) maxA = beratA; // Catat berat tertinggi
+  } else if (beratA < 0.4 && maxA >= 0.4) {
+    // TRIGGER: Barang diangkat, kirim nilai tertinggi ke MQTT
+    String payload = "A:" + String(maxA, 1);
+    client.publish("topic_mqtt", payload.c_str());
+    Serial.println("Data Terkirim ke MQTT -> " + payload);
+    maxA = 0; // Reset
+  }=
 
-  // Tentukan status standarisasi masing-masing sensor
-  bool okA = (beratA >= 1.0 && beratA <= 2.0);
-  
+  // Sensor B
+  if (beratB >= 0.4) {
+    if (beratB > maxB) maxB = beratB;
+  } else if (beratB < 0.4 && maxB >= 0.4) {
+    String payload = "B:" + String(maxB, 1);
+    client.publish("topic_mqtt", payload.c_str());
+    Serial.println("Data Terkirim ke MQTT -> " + payload);
+    maxB = 0; // Reset
+  }
+
+  // --- LOGIKA LED ---
+  bool okA = (beratA >= 10.0 && beratA <= 20.0);
   bool okB = (beratB >= 3.0 && beratB <= 4.0);
-
-  // Cek apakah ada benda di atas sensor (di atas noise gate 0.4kg)
   bool adaBendaA = (beratA >= 0.4);
   bool adaBendaB = (beratB >= 0.4);
 
-  // --- LOGIKA LED MERAH (Indikator Standby atau Salah Berat) ---
-  // Menyala jika: 
-  // - Keduanya kosong 
-  // - ATAU Ada benda di A tapi beratnya salah (!okA)
-  // - ATAU Ada benda di B tapi beratnya salah (!okB)
+  // LED MERAH
   if ((!adaBendaA && !adaBendaB) || (adaBendaA && !okA) || (adaBendaB && !okB)) {
     digitalWrite(LED_MERAH, HIGH);
   } else {
     digitalWrite(LED_MERAH, LOW);
   }
 
-  // --- LOGIKA LED BIRU (Sensor A OK) ---
-  if (okA) {
-    digitalWrite(LED_BIRU, HIGH);
-  } else {
-    digitalWrite(LED_BIRU, LOW);
-  }
+  // LED BIRU & HIJAU
+  digitalWrite(LED_BIRU, okA ? HIGH : LOW);
+  digitalWrite(LED_HIJAU, okB ? HIGH : LOW);
 
-  // --- LOGIKA LED HIJAU (Sensor B OK) ---
-  if (okB) {
-    digitalWrite(LED_HIJAU, HIGH);
-  } else {
-    digitalWrite(LED_HIJAU, LOW);
-  }
+  // Serial Print untuk Monitoring
+  Serial.print("A: "); Serial.print(beratA, 1);
+  Serial.print(" kg | B: "); Serial.print(beratB, 1);
+  Serial.println(" kg");
 
   yield();
   delay(100); 
